@@ -13,15 +13,14 @@ import os
 import argparse
 
 import numpy as np
-
+import heapq
 from models import *
 from utils import progress_bar
 
 import logging
 
 
-#TODO 调整模型参数刷到sota的结果
-#TODO 目标model：resnet
+#TODO 加入bs部分代码，带warning up / 需要调整epoch的大小，因为每轮的batchsize变小了
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -30,6 +29,8 @@ parser.add_argument('--resume', '-r', action='store_true',
 parser.add_argument('--model', default="resnet18", type=str, help='choose which model to use')
 parser.add_argument('--seed', default=1234, type=int, help='seed and experiment code')
 parser.add_argument('--nepochs', default=300, type=int, help='how many epochs to run')
+parser.add_argument('--bs', default=2, type=int, help='bs multi rate')
+parser.add_argument('--nwarm', default=100, type=int, help='warming up epochs')
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -44,7 +45,7 @@ if not os.path.exists('./experiment/'+args.model):
 # logger
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
-logfile = args.model + '_' + str(args.seed) + '_' + str(args.nepochs)
+logfile = "bs_" + args.model + '_' + str(args.seed) + '_' + str(args.nepochs) + '_' +str(args.bs)
 handler = logging.FileHandler('./experiment/' +args.model + '/' + logfile + '.txt')
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(message)s')
 handler.setFormatter(formatter)
@@ -62,6 +63,8 @@ logger.info("learning rate: {}".format(args.lr))
 logger.info("model:" + args.model)
 logger.info("Seed: {}".format(args.seed))
 logger.info("nepochs: {}".format(args.nepochs))
+logger.info("bs: {}".format(args.bs))
+logger.info("nwarm: {}".format(args.nwarm))
 
 # set seed
 np.random.seed(args.seed)
@@ -87,6 +90,8 @@ trainset = torchvision.datasets.CIFAR10(
     root='./data', train=True, download=True, transform=transform_train)
 trainloader = torch.utils.data.DataLoader(
     trainset, batch_size=128, shuffle=True, num_workers=2)
+trainloader_bs = torch.utils.data.DataLoader(
+    trainset, batch_size=int(128*args.bs), shuffle=True, num_workers=2)
 
 testset = torchvision.datasets.CIFAR10(
     root='./data', train=False, download=True, transform=transform_test)
@@ -145,25 +150,64 @@ def train(epoch):
     train_loss = 0
     correct = 0
     total = 0
-    for batch_idx, (inputs, targets) in enumerate(trainloader):
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = net(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
+    if epoch < args.nwarm:
+        for batch_idx, (inputs, targets) in enumerate(trainloader):
+            inputs, targets = inputs.to(device), targets.to(device)
+            optimizer.zero_grad()
+            outputs = net(inputs)
+            # ---------backpropagation-----------
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
 
-        train_loss += loss.item()
-        _, predicted = outputs.max(1)
-        total += targets.size(0)
-        correct += predicted.eq(targets).sum().item()
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            # break
+    else:
+        for batch_idx, (inputs, targets) in enumerate(trainloader_bs):
+            inputs, targets = inputs.to(device), targets.to(device)
+            optimizer.zero_grad()
+            outputs = net(inputs)
+            # -----------bs process----------------------
+            outputs_cpu = outputs.softmax(1).cpu().detach().numpy()
+            # print(outputs_cpu)
+            # print(outputs_cpu.shape)
+            # out_bs = []
+            entros = []
+            for i in range(outputs_cpu.shape[0]):
+                log_data = outputs_cpu[i] * np.log(abs(outputs_cpu[i]) + 1e-6)
+                # print(log_data)
+                entro = np.sum(log_data)
+                entro = entro.mean()
+                # print(entro)
+                entros.append(-entro)
+            max_n_index_list = list(map(entros.index, heapq.nlargest(128, entros)))
+            outputs = outputs[max_n_index_list, ]
+            # print(type(outputs))
+            targets = targets[max_n_index_list, ]
+            # print(type(targets))
+            # print(outputs.softmax(1))
+            # print(outputs.size)
+            # ---------backpropagation-----------
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += targets.size(0)
+            correct += predicted.eq(targets).sum().item()
+            # break
+
 
         # progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
         #              % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
     if epoch%10 == 0:
         logger.info("Train process")
-        logger.info('epoch: {}  loss: {}  acc {}'.format(epoch, (train_loss/len(trainloader)), 100.*correct/total))
+        logger.info('epoch: {}  loss: {}  acc {} lr {}'.format(epoch, (train_loss/len(trainloader)), 100.*correct/total, optimizer.state_dict()['param_groups'][0]['lr']))
 
 
 def test(epoch):
@@ -189,7 +233,7 @@ def test(epoch):
     # Save checkpoint.
     acc = 100.*correct/total
     if acc > best_acc:
-        print('Best acc on test renew' + "  " + "acc")
+        print('Best acc on test renew' + "  " + acc)
         state = {
             'net': net.state_dict(),
             'acc': acc,
@@ -203,20 +247,6 @@ def test(epoch):
         logger.info("Test process")
         logger.info('epoch: {}  acc: {}  best acc {}'.format(epoch, acc, best_acc))
 
-
-# for epoch in range(start_epoch, start_epoch+150):
-#     train(epoch)
-#     test(epoch)
-#
-# optimizer = optim.SGD(net.parameters(), lr=0.01,
-#                       momentum=0.9, weight_decay=5e-4)
-#
-# for epoch in range(start_epoch + 150, start_epoch+300):
-#     train(epoch)
-#     test(epoch)
-#
-# optimizer = optim.SGD(net.parameters(), lr=0.001,
-#                       momentum=0.9, weight_decay=5e-4)
 
 for epoch in range(start_epoch, start_epoch+args.nepochs):
     train(epoch)
