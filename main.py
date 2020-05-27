@@ -189,7 +189,7 @@ def test(epoch):
     # Save checkpoint.
     acc = 100.*correct/total
     if acc > best_acc:
-        print('Best acc on test renew' + "  " + "acc")
+        print('Best acc on test renew' + "  " + str(acc))
         state = {
             'net': net.state_dict(),
             'acc': acc,
@@ -203,20 +203,6 @@ def test(epoch):
         logger.info("Test process")
         logger.info('epoch: {}  acc: {}  best acc {}'.format(epoch, acc, best_acc))
 
-
-# for epoch in range(start_epoch, start_epoch+150):
-#     train(epoch)
-#     test(epoch)
-#
-# optimizer = optim.SGD(net.parameters(), lr=0.01,
-#                       momentum=0.9, weight_decay=5e-4)
-#
-# for epoch in range(start_epoch + 150, start_epoch+300):
-#     train(epoch)
-#     test(epoch)
-#
-# optimizer = optim.SGD(net.parameters(), lr=0.001,
-#                       momentum=0.9, weight_decay=5e-4)
 
 for epoch in range(start_epoch, start_epoch+args.nepochs):
     train(epoch)

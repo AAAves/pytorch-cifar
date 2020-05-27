@@ -31,6 +31,8 @@ parser.add_argument('--seed', default=1234, type=int, help='seed and experiment 
 parser.add_argument('--nepochs', default=300, type=int, help='how many epochs to run')
 parser.add_argument('--bs', default=2, type=int, help='bs multi rate')
 parser.add_argument('--nwarm', default=100, type=int, help='warming up epochs')
+parser.add_argument('--select_function', default="entro", type=str, help='how to select data')
+
 args = parser.parse_args()
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -45,7 +47,7 @@ if not os.path.exists('./experiment/'+args.model):
 # logger
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.INFO)
-logfile = "bs_" + args.model + '_' + str(args.seed) + '_' + str(args.nepochs) + '_' +str(args.bs)
+logfile = "bs_" + args.model + '_' + str(args.seed) + '_' + str(args.nepochs) + '_' +str(args.bs) + '_' +str(args.select_function)
 handler = logging.FileHandler('./experiment/' +args.model + '/' + logfile + '.txt')
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(message)s')
 handler.setFormatter(formatter)
@@ -65,6 +67,7 @@ logger.info("Seed: {}".format(args.seed))
 logger.info("nepochs: {}".format(args.nepochs))
 logger.info("bs: {}".format(args.bs))
 logger.info("nwarm: {}".format(args.nwarm))
+logger.info("select_function: {}".format(args.select_function))
 
 # set seed
 np.random.seed(args.seed)
@@ -166,48 +169,69 @@ def train(epoch):
             correct += predicted.eq(targets).sum().item()
             # break
     else:
-        for batch_idx, (inputs, targets) in enumerate(trainloader_bs):
-            inputs, targets = inputs.to(device), targets.to(device)
-            optimizer.zero_grad()
-            outputs = net(inputs)
-            # -----------bs process----------------------
-            outputs_cpu = outputs.softmax(1).cpu().detach().numpy()
-            # print(outputs_cpu)
-            # print(outputs_cpu.shape)
-            # out_bs = []
-            entros = []
-            for i in range(outputs_cpu.shape[0]):
-                log_data = outputs_cpu[i] * np.log(abs(outputs_cpu[i]) + 1e-6)
-                # print(log_data)
-                entro = np.sum(log_data)
-                entro = entro.mean()
-                # print(entro)
-                entros.append(-entro)
-            max_n_index_list = list(map(entros.index, heapq.nlargest(128, entros)))
-            outputs = outputs[max_n_index_list, ]
-            # print(type(outputs))
-            targets = targets[max_n_index_list, ]
-            # print(type(targets))
-            # print(outputs.softmax(1))
-            # print(outputs.size)
-            # ---------backpropagation-----------
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.step()
+        for _ in range(int(args.bs)):
+            # --------------------------
+            # -----If set bs>1,then add more iter to feed
+            for batch_idx, (inputs, targets) in enumerate(trainloader_bs):
+                inputs, targets = inputs.to(device), targets.to(device)
+                optimizer.zero_grad()
+                outputs = net(inputs)
+                # -----------bs process----------------------
+                # ---entro selection----
+                if args.select_function == 'entro':
+                    outputs_cpu = outputs.softmax(1).cpu().detach().numpy()
+                    # print(outputs_cpu)
+                    # print(outputs_cpu.shape)
+                    # out_bs = []
+                    entros = []
+                    for i in range(outputs_cpu.shape[0]):
+                        log_data = outputs_cpu[i] * np.log(abs(outputs_cpu[i]) + 1e-6)
+                        # print(log_data)
+                        entro = np.sum(log_data)
+                        entro = entro.mean()
+                        # print(entro)
+                        entros.append(-entro)
+                    max_n_index_list = list(map(entros.index, heapq.nlargest(128, entros)))
+                    outputs = outputs[max_n_index_list, ]
+                    # print(type(outputs))
+                    targets = targets[max_n_index_list, ]
+                    # print(type(targets))
+                    # print(outputs.softmax(1))
+                    # print(outputs.size)
+                # -------maxmin selection------------
+                elif args.select_function == 'maxmin':
+                    outputs_cpu = outputs.softmax(1).cpu().detach().numpy()
+                    maxps = []
+                    for i in range(outputs_cpu.shape[0]):
+                        maxp = np.max(outputs_cpu[i])
+                        maxps.append(-maxp)
+                    max_n_index_list = list(map(maxps.index, heapq.nlargest(128, maxps)))
+                    outputs = outputs[max_n_index_list, ]
+                    # print(type(outputs))
+                    targets = targets[max_n_index_list, ]
 
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-            # break
+                # ---------backpropagation-----------
+                loss = criterion(outputs, targets)
+                loss.backward()
+                optimizer.step()
 
-
-        # progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-        #              % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                total += targets.size(0)
+                correct += predicted.eq(targets).sum().item()
+                # break
 
     if epoch%10 == 0:
         logger.info("Train process")
-        logger.info('epoch: {}  loss: {}  acc {} lr {}'.format(epoch, (train_loss/len(trainloader)), 100.*correct/total, optimizer.state_dict()['param_groups'][0]['lr']))
+        if epoch<args.nwarm:
+            logger.info('epoch: {}  loss: {}  acc {} lr {}'.format(epoch,
+                                                                   (train_loss/len(trainloader)), 100.*correct/total,
+                                                                   optimizer.state_dict()['param_groups'][0]['lr']))
+        else:
+            logger.info('epoch: {}  loss: {}  acc {} lr {}'.format(epoch,
+                                                                   (train_loss/len(trainloader_bs)), 100.*correct/total,
+                                                                   optimizer.state_dict()['param_groups'][0]['lr']))
+
 
 
 def test(epoch):
@@ -233,7 +257,7 @@ def test(epoch):
     # Save checkpoint.
     acc = 100.*correct/total
     if acc > best_acc:
-        print('Best acc on test renew' + "  " + acc)
+        print('Best acc on test renew' + "  " + str(acc))
         state = {
             'net': net.state_dict(),
             'acc': acc,
